@@ -8,6 +8,7 @@ import type { InjectedBenchmarkRunConfig } from "../benchmarks/benchmark-config"
 import type { Benchmark } from "../benchmarks/types";
 import { Dataset } from "../harness/dataset";
 import { assertLeft, assertRight } from "../internal/testing";
+import type { ProviderConfig } from "../providers/provider-config";
 import { datasetSizeById, runBenchmarkById } from "./run-by-id";
 
 const INJECTED_BENCHMARK: Benchmark<InjectedBenchmarkRunConfig> = {
@@ -107,5 +108,148 @@ describe("benchmark runner by id", () => {
     assertLeft(sizeResult);
     expect(runResult.left).toContain("Benchmark id mismatch");
     expect(sizeResult.left).toBe(runResult.left);
+  });
+
+  describe("provider configuration", () => {
+    it("accepts OpenRouter provider with default base URL", async () => {
+      const providerConfig: ProviderConfig = {
+        apiKey: "sk-test",
+        baseUrl: "https://openrouter.ai/api/v1",
+        providerKind: "openrouter",
+        sessionId: "test",
+      };
+
+      const result = await runBenchmarkById({
+        benchmarkId: INJECTED_BENCHMARK.id,
+        injectedBenchmark: INJECTED_BENCHMARK,
+        apiKey: "sk-test",
+        benchmarkConfig: INJECTED_CONFIG,
+        epochs: 1,
+        maxConcurrency: 1,
+        sessionId: "test",
+        providerConfig,
+      });
+
+      assertLeft(result);
+      expect(result.left).toContain("injected benchmark used");
+    });
+
+    it("accepts chat provider with custom base URL", async () => {
+      const providerConfig: ProviderConfig = {
+        apiKey: "sk-test",
+        baseUrl: "https://api.openai.com/v1",
+        providerKind: "chat",
+        sessionId: "test",
+      };
+
+      const result = await runBenchmarkById({
+        benchmarkId: INJECTED_BENCHMARK.id,
+        injectedBenchmark: INJECTED_BENCHMARK,
+        apiKey: "sk-test",
+        benchmarkConfig: INJECTED_CONFIG,
+        epochs: 1,
+        maxConcurrency: 1,
+        sessionId: "test",
+        providerConfig,
+      });
+
+      assertLeft(result);
+      expect(result.left).toContain("injected benchmark used");
+    });
+
+    it("rejects missing API key", async () => {
+      const result = await runBenchmarkById({
+        benchmarkId: INJECTED_BENCHMARK.id,
+        injectedBenchmark: INJECTED_BENCHMARK,
+        apiKey: "",
+        benchmarkConfig: INJECTED_CONFIG,
+        epochs: 1,
+        maxConcurrency: 1,
+        sessionId: "test",
+      });
+
+      assertLeft(result);
+      expect(result.left).toContain("API key is required");
+    });
+
+    it("rejects invalid provider kind from env", async () => {
+      const originalProvider = process.env.MODEL_PROVIDER;
+      process.env.MODEL_PROVIDER = "invalid";
+
+      try {
+        const result = await runBenchmarkById({
+          benchmarkId: INJECTED_BENCHMARK.id,
+          injectedBenchmark: INJECTED_BENCHMARK,
+          apiKey: "sk-test",
+          benchmarkConfig: INJECTED_CONFIG,
+          epochs: 1,
+          maxConcurrency: 1,
+          sessionId: "test",
+          baseUrl: "https://custom.example.com",
+        });
+
+        assertLeft(result);
+        expect(result.left).toContain("Invalid provider kind");
+      } finally {
+        if (originalProvider === undefined) {
+          delete process.env.MODEL_PROVIDER;
+        } else {
+          process.env.MODEL_PROVIDER = originalProvider;
+        }
+      }
+    });
+
+    it("rejects non-OpenRouter URL without explicit provider", async () => {
+      const result = await runBenchmarkById({
+        benchmarkId: INJECTED_BENCHMARK.id,
+        injectedBenchmark: INJECTED_BENCHMARK,
+        apiKey: "sk-test",
+        benchmarkConfig: INJECTED_CONFIG,
+        epochs: 1,
+        maxConcurrency: 1,
+        sessionId: "test",
+        baseUrl: "https://custom.llm-provider.com",
+      });
+
+      assertLeft(result);
+      expect(result.left).toContain(
+        "Provider kind must be explicitly specified"
+      );
+    });
+
+    it("respects AUTH_HEADER_NAME environment variable", async () => {
+      const originalAuthHeader = process.env.AUTH_HEADER_NAME;
+      process.env.AUTH_HEADER_NAME = "x-api-key";
+
+      try {
+        const providerConfig: ProviderConfig = {
+          apiKey: "sk-test",
+          baseUrl: "https://api.example.com/v1",
+          providerKind: "chat",
+          sessionId: "test",
+          authHeaderName: "x-api-key",
+        };
+
+        const result = await runBenchmarkById({
+          benchmarkId: INJECTED_BENCHMARK.id,
+          injectedBenchmark: INJECTED_BENCHMARK,
+          apiKey: "sk-test",
+          benchmarkConfig: INJECTED_CONFIG,
+          epochs: 1,
+          maxConcurrency: 1,
+          sessionId: "test",
+          providerConfig,
+        });
+
+        assertLeft(result);
+        expect(result.left).toContain("injected benchmark used");
+      } finally {
+        if (originalAuthHeader === undefined) {
+          delete process.env.AUTH_HEADER_NAME;
+        } else {
+          process.env.AUTH_HEADER_NAME = originalAuthHeader;
+        }
+      }
+    });
   });
 });

@@ -29,6 +29,7 @@ import { runHarnessPromise } from "../internal/effect-logger";
 import { Either } from "../internal/either";
 import { definedValues, isMember } from "../internal/guards";
 import { parseSchema } from "../internal/zod";
+import type { ProviderKind } from "../providers/provider-config";
 import { makeLocalResultStore } from "../results/result-store";
 import { datasetSizeById, runBenchmarkById } from "../runner/run-by-id";
 
@@ -47,6 +48,9 @@ interface CliArgs {
   readonly imageDetail?: ImageDetail;
   readonly costTier?: CostTier;
   readonly reasoningEffort: ReasoningEffort;
+  readonly baseUrl?: string;
+  readonly apiKey?: string;
+  readonly provider?: ProviderKind;
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -57,6 +61,17 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   const num = (flag: string): number | undefined => {
     const raw = get(flag);
     return raw !== undefined ? Number(raw) : undefined;
+  };
+  const providerKind = (raw: string | undefined): ProviderKind | undefined => {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (raw !== "openrouter" && raw !== "chat") {
+      throw new Error(
+        `--provider must be "openrouter" or "chat" (got "${raw}")`
+      );
+    }
+    return raw;
   };
   return {
     benchmark: get("--benchmark") ?? "gpqa_diamond",
@@ -73,6 +88,9 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     imageDetail: validateImageDetail(get("--image-detail")),
     costTier: validateCostTier(get("--cost-tier")),
     reasoningEffort: validateReasoningEffort(get("--reasoning-effort")),
+    baseUrl: get("--base-url"),
+    apiKey: get("--api-key"),
+    provider: providerKind(get("--provider")),
   };
 }
 
@@ -128,20 +146,6 @@ function resolveSessionId(): string {
   return fromEnv ?? runSync(sync(() => crypto.randomUUID()));
 }
 
-function resolveApiKey(): string {
-  const primaryOpt = runSync(string("OPENROUTER_API_KEY").pipe(option));
-  const fallbackOpt = runSync(
-    string("BENCHMARKING_OPENROUTER_API_KEY").pipe(option)
-  );
-  const keyValue = getOrNull(primaryOpt) ?? getOrNull(fallbackOpt);
-  if (keyValue === null) {
-    throw new Error(
-      "Set OPENROUTER_API_KEY (or BENCHMARKING_OPENROUTER_API_KEY) in the environment."
-    );
-  }
-  return keyValue;
-}
-
 function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const benchmark = getBenchmark(args.benchmark);
@@ -150,10 +154,10 @@ function main(): Promise<void> {
       `Unknown benchmark "${args.benchmark}". Available: ${benchmarkIds().join(", ")}`
     );
   }
-  const apiKey = resolveApiKey();
-  const baseUrl = getOrNull(
-    runSync(string("OPENROUTER_BASE_URL").pipe(option))
-  );
+
+  const apiKey = args.apiKey;
+  const baseUrl = args.baseUrl;
+
   const epochs = args.epochs ?? benchmark.defaultEpochs;
   const range = resolveRange(args);
   const sessionId = resolveSessionId();
@@ -211,10 +215,11 @@ function main(): Promise<void> {
           definedValues({
             benchmarkId: args.benchmark,
             apiKey,
+            baseUrl,
+            provider: args.provider,
             benchmarkConfig: benchmarkRunConfig,
             epochs,
             maxConcurrency: args.concurrency,
-            baseUrl: baseUrl ? baseUrl : undefined,
             range,
             sessionId,
             resultStore: makeLocalResultStore({
