@@ -17,6 +17,7 @@ import { Scorer } from "../harness/scorer";
 import type { SolverService } from "../harness/solver";
 import { Solver } from "../harness/solver";
 import { definedValues } from "../internal/guards";
+import { makeChatCompletionsModelLayer } from "../providers/chat-completions-model";
 import { makeOpenRouterModelLayer } from "../providers/openrouter-model";
 import type { RetryConfig } from "../runtime/retry";
 import type { BenchmarkRunConfig } from "./benchmark-config";
@@ -61,18 +62,33 @@ export function defineSingleTurnBenchmark<
             input.datasetRetry
           )
         : definition.makeDatasetLayer(input.datasetRetry);
-    const modelLayer =
-      input.modelLayer ??
-      makeOpenRouterModelLayer(
+
+    let modelLayer;
+    if (input.modelLayer !== undefined) {
+      modelLayer = input.modelLayer;
+    } else if (input.providerConfig?.providerKind === "chat") {
+      modelLayer = makeChatCompletionsModelLayer({
+        model: benchmarkConfig.model,
+        apiKey: input.providerConfig.apiKey,
+        baseUrl: input.providerConfig.baseUrl,
+        sessionId: input.providerConfig.sessionId,
+        retry: input.providerConfig.retry,
+        traceHeaders: input.providerConfig.traceHeaders,
+        authHeaderName: input.providerConfig.authHeaderName,
+      });
+    } else {
+      modelLayer = makeOpenRouterModelLayer(
         definedValues({
           model: benchmarkConfig.model,
-          apiKey: input.apiKey,
-          baseUrl: input.baseUrl,
-          sessionId: input.sessionId,
-          retry: input.modelRetry,
-          traceHeaders: input.traceHeaders,
+          apiKey: input.providerConfig?.apiKey ?? input.apiKey,
+          baseUrl: input.providerConfig?.baseUrl ?? input.baseUrl,
+          sessionId: input.providerConfig?.sessionId ?? input.sessionId,
+          retry: input.providerConfig?.retry ?? input.modelRetry,
+          traceHeaders:
+            input.providerConfig?.traceHeaders ?? input.traceHeaders,
         })
       );
+    }
     const solverLayer = layerEffect(Solver)(
       gen(function* () {
         const model = yield* Model;

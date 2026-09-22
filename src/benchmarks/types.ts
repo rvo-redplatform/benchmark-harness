@@ -6,6 +6,7 @@ import type { Model } from "../harness/model";
 import type { RunResult } from "../harness/run";
 import type { Scorer } from "../harness/scorer";
 import type { Solver } from "../harness/solver";
+import type { ProviderConfig } from "../providers/provider-config";
 import type { ResponsesModel } from "../providers/responses-model";
 import type { RetryConfig } from "../runtime/retry";
 import type {
@@ -30,6 +31,7 @@ export interface BenchmarkRunInput<
     Error,
     HttpClient.HttpClient
   >;
+  readonly providerConfig?: ProviderConfig;
 }
 
 export interface BenchmarkPrimaryScore {

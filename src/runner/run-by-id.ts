@@ -38,6 +38,10 @@ import type { AsyncEither } from "../internal/either";
 import { Either } from "../internal/either";
 import { definedValues } from "../internal/guards";
 import { wLog } from "../internal/log";
+import type {
+  ProviderConfig,
+  ProviderKind,
+} from "../providers/provider-config";
 import type { ResultStoreService } from "../results/result-store";
 import {
   GenerationResolver,
@@ -47,11 +51,16 @@ import { withRunAttempt } from "../runtime/response-cache";
 import type { RetryConfig } from "../runtime/retry";
 import { filterTraceHeaders } from "./trace-headers";
 
+const NOOP_GENERATION_RESOLVER = {
+  resolveSourceGeneration: () => Promise.resolve(undefined) as any,
+} as const;
+
 export interface RunBenchmarkInput {
   readonly benchmarkId: string;
   readonly injectedBenchmark?: Benchmark<InjectedBenchmarkRunConfig>;
-  readonly apiKey: string;
+  readonly apiKey?: string;
   readonly baseUrl?: string;
+  readonly provider?: ProviderKind;
   readonly benchmarkConfig: BenchmarkRunConfig;
   readonly epochs: number;
   readonly maxConcurrency: number;
@@ -68,6 +77,7 @@ export interface RunBenchmarkInput {
   readonly resultStore?: ResultStoreService;
   readonly maxOutputTokensCeiling?: number;
   readonly traceHeaders?: Readonly<Record<string, string>>;
+  readonly providerConfig?: ProviderConfig;
 }
 
 export interface RunBenchmarkOutput {
@@ -78,7 +88,13 @@ export interface RunBenchmarkOutput {
 export function runBenchmarkById(
   input: RunBenchmarkInput
 ): AsyncEither<RunBenchmarkOutput, string> {
-  const benchmarkResult = resolveRunBenchmark(input);
+  const providerConfigResult = resolveProviderConfigForRun(input);
+  if (Either.isLeft(providerConfigResult)) {
+    return Promise.resolve(Either.left(providerConfigResult.left));
+  }
+  const providerConfig = providerConfigResult.right;
+
+  const benchmarkResult = resolveRunBenchmark(input, providerConfig);
   if (Either.isLeft(benchmarkResult)) {
     return Promise.resolve(Either.left(benchmarkResult.left));
   }
@@ -108,17 +124,21 @@ export function runBenchmarkById(
   const fullBenchmarkLayer = benchmarkLayer.pipe(
     layerProvide(FetchHttpClient.layer)
   );
-  const traceHeaders = filterTraceHeaders(input.traceHeaders);
-  const resolverLayer = layerSucceed(
-    GenerationResolver,
-    makeOpenRouterGenerationResolver(
-      definedValues({
-        apiKey: input.apiKey,
-        baseUrl: input.baseUrl,
-        traceHeaders,
-      })
-    )
-  );
+
+  const resolverLayer =
+    providerConfig.providerKind === "openrouter"
+      ? layerSucceed(
+          GenerationResolver,
+          makeOpenRouterGenerationResolver(
+            definedValues({
+              apiKey: providerConfig.apiKey,
+              baseUrl: providerConfig.baseUrl,
+              traceHeaders: providerConfig.traceHeaders,
+            })
+          )
+        )
+      : layerSucceed(GenerationResolver, NOOP_GENERATION_RESOLVER);
+
   const layers = layerMergeAll(
     fullBenchmarkLayer,
     progressLayer,
@@ -191,7 +211,117 @@ function resolveBenchmark(
     : Either.right(benchmark);
 }
 
-function resolveRunBenchmark(input: RunBenchmarkInput): Either.Either<
+function makeBenchmarkLayer<Config extends BenchmarkRunConfig>(
+  benchmark: Benchmark<Config>,
+  input: RunBenchmarkInput,
+  benchmarkConfig: Config,
+  providerConfig: ProviderConfig
+): ReturnType<Benchmark["makeLayer"]> {
+  const maxRetries = benchmarkConfig.maxRetries;
+  const traceHeaders = filterTraceHeaders(input.traceHeaders);
+  const benchmarkInput: BenchmarkRunInput<Config> = {
+    benchmarkConfig,
+    ...definedValues({
+      apiKey: input.apiKey,
+      baseUrl: input.baseUrl,
+      traceHeaders,
+      sessionId: input.sessionId,
+      datasetRetry: input.datasetRetry,
+      modelRetry: maxRetries !== undefined ? { maxRetries } : undefined,
+      maxOutputTokensCeiling: input.maxOutputTokensCeiling,
+      providerConfig,
+    }),
+  };
+  return benchmark.makeLayer(benchmarkInput);
+}
+
+function resolveProviderConfigForRun(
+  input: RunBenchmarkInput
+): Either.Either<ProviderConfig, string> {
+  if (input.providerConfig !== undefined) {
+    return Either.right(input.providerConfig);
+  }
+
+  const modelBaseUrlEnv = process.env.MODEL_BASE_URL;
+  const modelApiKeyEnv = process.env.MODEL_API_KEY;
+  const modelProviderEnv = process.env.MODEL_PROVIDER;
+  const authHeaderNameEnv = process.env.AUTH_HEADER_NAME;
+  const openrouterBaseUrlEnv = process.env.OPENROUTER_BASE_URL;
+  const openrouterApiKeyEnv = process.env.OPENROUTER_API_KEY;
+
+  const rawBaseUrl =
+    input.baseUrl ??
+    modelBaseUrlEnv ??
+    openrouterBaseUrlEnv ??
+    "https://openrouter.ai";
+
+  const apiKey = input.apiKey ?? modelApiKeyEnv ?? openrouterApiKeyEnv;
+
+  if (apiKey === undefined || apiKey.trim() === "") {
+    return Either.left("API key is required and must be non-empty");
+  }
+
+  if (!isValidHttpUrl(rawBaseUrl)) {
+    return Either.left(
+      `Invalid base URL: must be a valid HTTP or HTTPS URL (got: ${rawBaseUrl})`
+    );
+  }
+
+  let providerKind: "openrouter" | "chat";
+  const isOpenRouterDefault =
+    rawBaseUrl === "https://openrouter.ai" ||
+    rawBaseUrl === "https://openrouter.ai/";
+
+  if (input.provider !== undefined) {
+    providerKind = input.provider;
+  } else if (modelProviderEnv !== undefined) {
+    if (modelProviderEnv !== "openrouter" && modelProviderEnv !== "chat") {
+      return Either.left(
+        `Invalid provider kind: must be "openrouter" or "chat" (got: ${modelProviderEnv})`
+      );
+    }
+    providerKind = modelProviderEnv;
+  } else if (isOpenRouterDefault || openrouterBaseUrlEnv !== undefined) {
+    providerKind = "openrouter";
+  } else {
+    return Either.left(
+      "Provider kind must be explicitly specified when using a non-OpenRouter base URL (use --provider or MODEL_PROVIDER)"
+    );
+  }
+
+  const baseUrl =
+    providerKind === "openrouter"
+      ? normalizeOpenRouterBaseUrl(rawBaseUrl)
+      : rawBaseUrl.replace(/\/+$/u, "");
+
+  return Either.right({
+    apiKey,
+    baseUrl,
+    providerKind,
+    sessionId: input.sessionId,
+    traceHeaders: input.traceHeaders,
+    authHeaderName: authHeaderNameEnv,
+  });
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOpenRouterBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/u, "");
+  return trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
+}
+
+function resolveRunBenchmark(
+  input: RunBenchmarkInput,
+  providerConfig: ProviderConfig
+): Either.Either<
   {
     readonly benchmark: BenchmarkMetadata;
     readonly benchmarkLayer: ReturnType<Benchmark["makeLayer"]>;
@@ -213,7 +343,8 @@ function resolveRunBenchmark(input: RunBenchmarkInput): Either.Either<
       benchmarkLayer: makeBenchmarkLayer(
         nativeBenchmark,
         input,
-        input.benchmarkConfig
+        input.benchmarkConfig,
+        providerConfig
       ),
     });
   }
@@ -232,29 +363,8 @@ function resolveRunBenchmark(input: RunBenchmarkInput): Either.Either<
     benchmarkLayer: makeBenchmarkLayer(
       input.injectedBenchmark,
       input,
-      input.benchmarkConfig
+      input.benchmarkConfig,
+      providerConfig
     ),
   });
-}
-
-function makeBenchmarkLayer<Config extends BenchmarkRunConfig>(
-  benchmark: Benchmark<Config>,
-  input: RunBenchmarkInput,
-  benchmarkConfig: Config
-): ReturnType<Benchmark["makeLayer"]> {
-  const maxRetries = benchmarkConfig.maxRetries;
-  const traceHeaders = filterTraceHeaders(input.traceHeaders);
-  const benchmarkInput: BenchmarkRunInput<Config> = {
-    benchmarkConfig,
-    ...definedValues({
-      apiKey: input.apiKey,
-      baseUrl: input.baseUrl,
-      traceHeaders,
-      sessionId: input.sessionId,
-      datasetRetry: input.datasetRetry,
-      modelRetry: maxRetries !== undefined ? { maxRetries } : undefined,
-      maxOutputTokensCeiling: input.maxOutputTokensCeiling,
-    }),
-  };
-  return benchmark.makeLayer(benchmarkInput);
 }

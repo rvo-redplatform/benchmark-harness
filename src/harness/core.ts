@@ -159,6 +159,7 @@ export interface ModelOutput {
   readonly usage?: ModelUsage;
   readonly generationTimeMs?: number;
   readonly rawResponse?: Readonly<Record<string, unknown>>;
+  readonly finishReason?: "stop" | "length" | null;
 }
 
 export interface TaskState {
